@@ -1,0 +1,6 @@
+main: ninja.smirking.voteshare.VotePlugin
+version: ${project.version}
+author: SmirkingNinja
+name: Voteshare
+depend:
+- Votifier
