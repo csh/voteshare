@@ -6,12 +6,13 @@ import com.google.common.io.ByteArrayDataOutput;
 import com.google.common.io.ByteStreams;
 
 import java.nio.charset.StandardCharsets;
-import java.util.concurrent.BlockingQueue;
+import java.util.Queue;
 import java.util.logging.Level;
 
 import com.vexsoftware.votifier.model.Vote;
 import com.vexsoftware.votifier.model.VotifierEvent;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.HandlerList;
 import org.bukkit.event.Listener;
 import org.bukkit.event.server.PluginDisableEvent;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -19,7 +20,7 @@ import redis.clients.jedis.BinaryJedisPubSub;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
 import redis.clients.jedis.JedisPoolConfig;
-import redis.clients.jedis.Pipeline;
+import redis.clients.jedis.Transaction;
 import redis.clients.jedis.exceptions.JedisException;
 
 /**
@@ -28,13 +29,13 @@ import redis.clients.jedis.exceptions.JedisException;
 public final class VotePlugin extends JavaPlugin {
   public static final byte[] CHANNEL_NAME = ("voteshare").getBytes(StandardCharsets.UTF_8);
 
-  private final BlockingQueue<Vote> queue;
+  private final Queue<Vote> queue;
   private BinaryJedisPubSub pubSub;
   private ListenerType type;
   private JedisPool pool;
 
   public VotePlugin() {
-    this.queue = Queues.newLinkedBlockingQueue(2048);
+    this.queue = Queues.newConcurrentLinkedQueue();
   }
 
   @Override
@@ -80,10 +81,7 @@ public final class VotePlugin extends JavaPlugin {
 
         @EventHandler
         public void onVote(VotifierEvent event) {
-          if(!queue.offer(event.getVote())) {
-            getLogger().log(Level.WARNING, "Queue refused offered vote, it is most likely full!");
-            getLogger().log(Level.WARNING, "You may want to decrease the poll-interval config option.");
-          }
+          queue.offer(event.getVote());
         }
       }, this);
 
@@ -92,15 +90,19 @@ public final class VotePlugin extends JavaPlugin {
           return;
         }
         try (Jedis jedis = pool.getResource()) {
-          Pipeline pipeline = jedis.pipelined();
-          while(queue.size() > 0) {
-            pipeline.publish(CHANNEL_NAME, serialize(queue.poll()));
+          Transaction transaction = jedis.multi();
+          while(true) {
+            Vote vote = queue.poll();
+            if (vote == null) {
+              break;
+            }
+            transaction.publish(CHANNEL_NAME, serialize(vote));
           }
-          pipeline.sync();
+          transaction.exec();
         } catch (JedisException ex) {
           getLogger().log(Level.SEVERE, "Error processing pending votes: ", ex);
         }
-      }, 60L, pollInterval);
+      }, pollInterval, pollInterval);
     } else {
       pubSub = new VoteSubscriber(this);
       getServer().getScheduler().runTaskAsynchronously(this, () -> {
@@ -118,23 +120,22 @@ public final class VotePlugin extends JavaPlugin {
     queue.clear();
     if (pool != null) {
       if (type == ListenerType.BROADCAST) {
-        queue.clear();
-      } else {
-        getLogger().log(Level.INFO, "Attempting to unsubscribe from the jedis pubsub!");
+        getLogger().log(Level.INFO, "Attempting to unsubscribe our pubsub!");
         try {
           pubSub.unsubscribe(CHANNEL_NAME);
         } catch (JedisException ex) {
           getLogger().log(Level.SEVERE, "Failed to unsubscribe from channel: ", ex);
         }
+      } else {
+        HandlerList.unregisterAll(this);
       }
-
       getLogger().log(Level.INFO, "Destroying jedis pool");
       pool.destroy();
       pool = null;
     }
   }
 
-  private byte[] serialize(Vote vote) {
+  private static byte[] serialize(Vote vote) {
     Preconditions.checkNotNull(vote, "vote should not be null!");
     ByteArrayDataOutput output = ByteStreams.newDataOutput();
     output.writeUTF(vote.getServiceName());

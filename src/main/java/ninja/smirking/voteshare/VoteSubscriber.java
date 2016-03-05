@@ -13,7 +13,7 @@ import redis.clients.jedis.BinaryJedisPubSub;
 /**
  * @author Connor Spencer Harries
  */
-public class VoteSubscriber extends BinaryJedisPubSub {
+public final class VoteSubscriber extends BinaryJedisPubSub {
   private final VotePlugin plugin;
 
   public VoteSubscriber(VotePlugin plugin) {
